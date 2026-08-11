@@ -5,7 +5,7 @@ import logger from "../utils/logger.js";
 const { ObjectId } = mongoose.Types;
 
 const WALLET_PER_ORDER = 10;
-const EXPIRY_DAYS = 6;
+const EXPIRY_DAYS = 7;
 
 async function expireEntries(userId) {
   try {
@@ -56,6 +56,25 @@ export const getWalletBalance = async (req, res) => {
   }
 };
 
+export const getWalletActiveEntries = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    await expireEntries(userId);
+    const entries = await WalletEntry.find({
+      userId,
+      expired: false,
+      remainingAmount: { $gt: 0 },
+      amount: { $gt: 0 },
+    })
+      .sort({ createdAt: 1 })
+      .lean();
+    return res.json({ success: true, data: { entries } });
+  } catch (err) {
+    logger.error("getWalletActiveEntries error:", err);
+    return res.status(500).json({ success: false, message: "Failed to fetch wallet entries" });
+  }
+};
+
 export const getWalletTransactions = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -103,17 +122,21 @@ export const creditWalletForOrder = async (userId, orderId) => {
   }
 };
 
+const todaySpinDate = () => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
 export const checkSpinAvailable = async (req, res) => {
   try {
     const userId = req.user.id;
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
     const existing = await WalletEntry.findOne({
       userId,
       source: "spin_win",
-      createdAt: { $gte: todayStart, $lte: todayEnd },
+      spinDate: todaySpinDate(),
     });
     return res.json({ success: true, data: { canSpin: !existing } });
   } catch (err) {
@@ -122,35 +145,55 @@ export const checkSpinAvailable = async (req, res) => {
   }
 };
 
+const SPIN_CASH_PRIZES = [5, 7, 9, 10];
+const FREE_DELIVERY_EXPIRY_DAYS = 30;
+const SPIN_OUTCOMES = [
+  ...SPIN_CASH_PRIZES.map((amount) => ({ type: "cash", amount })),
+  { type: "free_delivery" },
+  { type: "none" },
+];
+
+const pickSpinOutcome = () => SPIN_OUTCOMES[Math.floor(Math.random() * SPIN_OUTCOMES.length)];
+
 export const creditWalletSpinWin = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { amount } = req.body;
-    if (!amount || amount <= 0 || amount > 100) {
-      return res.status(400).json({ success: false, message: "Invalid win amount" });
-    }
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayEnd = new Date();
-    todayEnd.setHours(23, 59, 59, 999);
+    const spinDate = todaySpinDate();
     const existing = await WalletEntry.findOne({
       userId,
       source: "spin_win",
-      createdAt: { $gte: todayStart, $lte: todayEnd },
+      spinDate,
     });
     if (existing) {
       return res.status(400).json({ success: false, message: "Already spun today. Come back tomorrow!" });
     }
-    const expiresAt = new Date(Date.now() + EXPIRY_DAYS * 24 * 60 * 60 * 1000);
-    const entry = await WalletEntry.create({
-      userId,
-      amount,
-      remainingAmount: amount,
-      source: "spin_win",
-      expiresAt,
-    });
+
+    const outcome = pickSpinOutcome();
+    const isCash = outcome.type === "cash";
+    const amount = isCash ? outcome.amount : 0;
+    const expiresAt = new Date(
+      Date.now() +
+        (outcome.type === "free_delivery" ? FREE_DELIVERY_EXPIRY_DAYS : EXPIRY_DAYS) * 24 * 60 * 60 * 1000
+    );
+    let entry;
+    try {
+      entry = await WalletEntry.create({
+        userId,
+        amount,
+        remainingAmount: amount,
+        source: "spin_win",
+        spinDate,
+        prizeType: outcome.type,
+        expiresAt,
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        return res.status(400).json({ success: false, message: "Already spun today. Come back tomorrow!" });
+      }
+      throw err;
+    }
     const balance = await getBalance(userId);
-    return res.json({ success: true, data: { entry, balance } });
+    return res.json({ success: true, data: { entry, balance, prize: outcome } });
   } catch (err) {
     logger.error("creditWalletSpinWin error:", err);
     return res.status(500).json({ success: false, message: "Failed to credit winnings" });
@@ -177,15 +220,21 @@ export const redeemWallet = async (req, res) => {
     }
 
     let remainingToDeduct = amount;
-    const updatedEntries = [];
     for (const entry of entries) {
       if (remainingToDeduct <= 0) break;
       const deduct = Math.min(entry.remainingAmount, remainingToDeduct);
-      entry.remainingAmount -= deduct;
+      const updated = await WalletEntry.findOneAndUpdate(
+        { _id: entry._id, remainingAmount: { $gte: deduct } },
+        { $inc: { remainingAmount: -deduct } },
+        { new: true }
+      );
+      if (!updated) continue;
       remainingToDeduct -= deduct;
-      updatedEntries.push(entry.save());
     }
-    await Promise.all(updatedEntries);
+
+    if (remainingToDeduct > 0) {
+      return res.status(400).json({ success: false, message: "Insufficient balance" });
+    }
 
     await WalletEntry.create({
       userId,
@@ -204,12 +253,37 @@ export const redeemWallet = async (req, res) => {
   }
 };
 
+export const getBalanceInternal = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!ObjectId.isValid(String(userId))) {
+      return res.status(400).json({ success: false, message: "Invalid userId" });
+    }
+    await expireEntries(userId);
+    const balance = await getBalance(userId);
+    return res.json({ success: true, data: { userId, balance } });
+  } catch (err) {
+    logger.error("getBalanceInternal error:", err);
+    return res.status(500).json({ success: false, message: "Failed to fetch wallet balance" });
+  }
+};
+
 export const creditOrderInternal = async (req, res) => {
   try {
-    const { orderId } = req.body;
-    const userId = req.user?.id;
+    const { orderId, userId } = req.body;
     if (!orderId || !userId) {
-      return res.status(400).json({ success: false, message: "orderId and authentication required" });
+      return res.status(400).json({ success: false, message: "orderId and userId are required" });
+    }
+    if (!ObjectId.isValid(String(userId)) || !ObjectId.isValid(String(orderId))) {
+      return res.status(400).json({ success: false, message: "Invalid userId or orderId" });
+    }
+    const existing = await WalletEntry.findOne({
+      userId,
+      source: "order",
+      orderId,
+    });
+    if (existing) {
+      return res.json({ success: true, alreadyCredited: true, data: { entry: existing } });
     }
     const entry = await creditWalletForOrder(userId, orderId);
     if (!entry) return res.status(500).json({ success: false, message: "Failed to credit wallet" });
@@ -217,5 +291,52 @@ export const creditOrderInternal = async (req, res) => {
   } catch (err) {
     logger.error("creditOrderInternal error:", err);
     return res.status(500).json({ success: false, message: "Failed to credit wallet" });
+  }
+};
+
+export const getFreeDeliveryStatus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const active = await WalletEntry.findOne({
+      userId,
+      source: "spin_win",
+      prizeType: "free_delivery",
+      used: false,
+      expired: false,
+      expiresAt: { $gt: new Date() },
+    });
+    return res.json({ success: true, data: { available: !!active, entry: active || null } });
+  } catch (err) {
+    logger.error("getFreeDeliveryStatus error:", err);
+    return res.status(500).json({ success: false, message: "Failed to check free delivery" });
+  }
+};
+
+export const consumeFreeDeliveryInternal = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId || !ObjectId.isValid(String(userId))) {
+      return res.status(400).json({ success: false, message: "Invalid userId" });
+    }
+    const now = new Date();
+    const updated = await WalletEntry.findOneAndUpdate(
+      {
+        userId,
+        source: "spin_win",
+        prizeType: "free_delivery",
+        used: false,
+        expired: false,
+        expiresAt: { $gt: now },
+      },
+      { $set: { used: true } },
+      { new: true }
+    );
+    if (!updated) {
+      return res.status(400).json({ success: false, message: "No active free delivery coupon" });
+    }
+    return res.json({ success: true, data: { consumed: true, entry: updated } });
+  } catch (err) {
+    logger.error("consumeFreeDeliveryInternal error:", err);
+    return res.status(500).json({ success: false, message: "Failed to consume free delivery coupon" });
   }
 };

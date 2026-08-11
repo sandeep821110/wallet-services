@@ -22,8 +22,21 @@ const WalletEntrySchema = new mongoose.Schema({
     enum: ["order", "spin_win", "admin", "redeem"],
     required: true,
   },
+  prizeType: {
+    type: String,
+    enum: ["cash", "free_delivery", "none"],
+    default: "cash",
+  },
+  used: {
+    type: Boolean,
+    default: false,
+  },
   orderId: {
     type: mongoose.Schema.Types.ObjectId,
+    default: null,
+  },
+  spinDate: {
+    type: String,
     default: null,
   },
   expiresAt: {
@@ -41,6 +54,7 @@ const WalletEntrySchema = new mongoose.Schema({
 });
 
 WalletEntrySchema.index({ userId: 1, expired: 1, expiresAt: 1 });
+WalletEntrySchema.index({ userId: 1, spinDate: 1 }, { unique: true, sparse: true });
 WalletEntrySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const WalletEntry = mongoose.model("WalletEntry", WalletEntrySchema);

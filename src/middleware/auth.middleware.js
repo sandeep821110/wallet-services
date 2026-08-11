@@ -1,6 +1,14 @@
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 
 const getAccessSecret = () => (process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || "").trim();
+
+const timingSafeEqual = (provided, expected) => {
+  const a = Buffer.from(String(provided || ""));
+  const b = Buffer.from(String(expected || ""));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+};
 
 const extractAccessToken = (req) => {
   const auth = req.headers.authorization || req.headers.Authorization;
@@ -31,4 +39,16 @@ export const authenticate = (req, res, next) => {
     }
     return res.status(401).json({ success: false, message: "Invalid or expired token" });
   }
+};
+
+export const verifyInternalToken = (req, res, next) => {
+  const expected = process.env.INTERNAL_API_SECRET;
+  if (!expected) {
+    return res.status(503).json({ success: false, message: "Internal API not configured" });
+  }
+  const provided = req.headers["x-internal-token"];
+  if (!timingSafeEqual(provided, expected)) {
+    return res.status(403).json({ success: false, message: "Forbidden" });
+  }
+  next();
 };
