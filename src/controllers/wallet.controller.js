@@ -9,12 +9,12 @@ const EXPIRY_DAYS = 7;
 
 async function expireEntries(userId) {
   try {
-    const result = await WalletEntry.updateMany(
-      { userId, expired: false, expiresAt: { $lte: new Date() }, remainingAmount: { $gt: 0 } },
-      { $set: { expired: true, remainingAmount: 0 } }
-    );
-    if (result.modifiedCount > 0) {
-      logger.info(`Expired ${result.modifiedCount} wallet entries for user ${userId}`);
+    const result = await WalletEntry.deleteMany({
+      userId,
+      expiresAt: { $lte: new Date() },
+    });
+    if (result.deletedCount > 0) {
+      logger.info(`Deleted ${result.deletedCount} expired wallet entries for user ${userId}`);
     }
   } catch (err) {
     logger.error("expireEntries error:", err);
@@ -168,7 +168,14 @@ export const creditWalletSpinWin = async (req, res) => {
       return res.status(400).json({ success: false, message: "Already spun today. Come back tomorrow!" });
     }
 
-    const outcome = pickSpinOutcome();
+    const segmentIndex = parseInt(req.body?.segmentIndex, 10);
+    const outcome =
+      Number.isInteger(segmentIndex) &&
+      segmentIndex >= 0 &&
+      segmentIndex < SPIN_OUTCOMES.length
+        ? SPIN_OUTCOMES[segmentIndex]
+        : pickSpinOutcome();
+
     const isCash = outcome.type === "cash";
     const amount = isCash ? outcome.amount : 0;
     const expiresAt = new Date(
