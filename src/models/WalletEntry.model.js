@@ -54,7 +54,10 @@ const WalletEntrySchema = new mongoose.Schema({
 });
 
 WalletEntrySchema.index({ userId: 1, expired: 1, expiresAt: 1 });
-WalletEntrySchema.index({ userId: 1, spinDate: 1 }, { unique: true, sparse: true });
+WalletEntrySchema.index(
+  { userId: 1, spinDate: 1 },
+  { unique: true, partialFilterExpression: { spinDate: { $type: "string" } } }
+);
 WalletEntrySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const WalletEntry = mongoose.model("WalletEntry", WalletEntrySchema);

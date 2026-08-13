@@ -39,7 +39,12 @@ export const connectDB = async () => {
     if (removed > 0) console.log(`Removed ${removed} duplicate daily spin entries`);
 
     // Enforce exactly one spin per user per day.
-    await col.createIndex({ userId: 1, spinDate: 1 }, { unique: true, sparse: true });
+    // Partial index (not sparse) so non-spin entries with spinDate: null are ignored.
+    await col.dropIndex("userId_1_spinDate_1").catch(() => {});
+    await col.createIndex(
+      { userId: 1, spinDate: 1 },
+      { unique: true, partialFilterExpression: { spinDate: { $type: "string" } } }
+    );
     // Balance lookup + 7-day auto purge (TTL).
     await col.createIndex({ userId: 1, expired: 1, expiresAt: 1 });
     await col.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
